@@ -1,374 +1,234 @@
-// terminal-plus.js
-// ESTE ARQUIVO DEVE ESTAR NO SEU REPOSITÓRIO GITHUB
+/**
+ * =============================================================================
+ * TerminalPMPlus - Script Principal (v4.0 - Manifest V3)
+ * 
+ * Este script é injetado na página do Terminal da PMMG e é responsável por:
+ * 1. Carregar credenciais (Token do GitHub) de forma segura.
+ * 2. Comunicar-se com a API do GitHub através da extensão para evitar CORS.
+ * 3. Gerenciar macros e outras funcionalidades da ferramenta.
+ * =============================================================================
+ */
 
-(function() {
-    'use strict';
+// --- Funções Auxiliares de Comunicação com a Extensão ---
 
-    // Evita reinicialização
-    if (window.terminalPMPlusInitialized) {
-        console.log('TerminalPMPlus: Tentativa de reinicialização bloqueada.');
-        return;
+/**
+ * Busca um valor do chrome.storage da extensão de forma assíncrona.
+ * @param {string} key A chave a ser buscada.
+ * @returns {Promise<any>} O valor encontrado ou undefined.
+ */
+function getStorageValue(key) {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            window.removeEventListener('message', listener);
+            reject(new Error(`Timeout ao buscar a chave '${key}' do storage. A extensão pode estar desativada.`));
+        }, 5000);
+
+        const listener = (event) => {
+            if (event.source === window && event.data.type === 'tpm_storage_response' && event.data.key === key) {
+                clearTimeout(timeout);
+                window.removeEventListener('message', listener);
+                resolve(event.data.value);
+            }
+        };
+
+        window.addEventListener('message', listener);
+        window.postMessage({ type: 'tpm_get_storage', key: key }, '*');
+    });
+}
+
+/**
+ * Salva um valor no chrome.storage da extensão.
+ * @param {string} key A chave onde o valor será salvo.
+ * @param {any} value O valor a ser salvo.
+ */
+function setStorageValue(key, value) {
+    window.postMessage({ type: 'tpm_set_storage', key: key, value: value }, '*');
+}
+
+
+/**
+ * Classe principal que encapsula toda a lógica do TerminalPMPlus.
+ */
+class TerminalPMPlus {
+    constructor() {
+        this.github_pat = null;      // Armazena o GitHub PAT após o carregamento.
+        this.github_user = null;     // Armazena os dados do usuário do GitHub.
+        this.macros = [];            // Armazena as macros carregadas.
+        this.repoPath = 'site15rpm/IntranetPMPlus-Macros'; // Caminho do repositório de macros.
     }
-    window.terminalPMPlusInitialized = true;
-    console.log('TerminalPMPlus: Script principal carregado e aguardando o terminal...');
 
-    // --- CONFIGURAÇÃO ---
-    const GITHUB_REPO_OWNER = 'site15rpm';
-    const GITHUB_REPO_NAME = 'IntranetPMPlus-Macros'; // Repositório onde as MACROS estão salvas
-    const GITHUB_MACROS_PATH = 'macros'; // Pasta onde as macros estão
-    const ADMIN_USER = 's145320'; // Usuário com permissão para excluir
+    /**
+     * Ponto de entrada. Orquestra a inicialização do sistema.
+     */
+    async init() {
+        console.log('TerminalPMPlus: Sistema iniciando...');
 
-    class TerminalPMPlus {
-        constructor(term) {
-            this.term = term;
-            this.macros = {};
-            this.githubToken = null;
-            this.githubUser = null;
-            this.isRecording = false;
-            this.recordedMacro = [];
-            this.keyMap = {
-                'ENTER': '\r', 'TAB': '\t', 'BACKSPACE': '\x7f', 'DELETE': '\x1b[3~',
-                'END': '\x1b[F', 'PF1': '\x1bOP', 'PF2': '\x1bOQ', 'PF3': '\x1bOR',
-                'PF4': '\x1bOS', 'PF5': '\x1b[15~', 'PF6': '\x1b[17~', 'PF7': '\x1b[18~',
-                'PF8': '\x1b[19~', 'PF9': '\x1b[20~', 'PF10': '\x1b[21~', 'PF11': '\x1b[23~',
-                'PF12': '\x1b[24~',
-            };
+        // 1. Espera o objeto 'term' global da página estar disponível.
+        if (!await this.waitForTermObject()) {
+            console.error('TerminalPMPlus: Objeto "term" não encontrado na página. A aplicação não pode continuar.');
+            return;
+        }
+        console.log('TerminalPMPlus: Objeto "term" encontrado.');
+
+        // 2. Carrega as credenciais e os dados do usuário. A ordem é crucial.
+        await this.loadCredentials();
+
+        // 3. Se as credenciais foram carregadas, carrega as macros.
+        if (this.github_user) {
+            await this.loadMacros();
         }
 
-        async init() {
-            console.log('TerminalPMPlus: Inicializando...');
-            await this.loadCredentials();
-            this.createMainMenu();
-            await this.refreshMacros();
-            this.tryAutoLogin();
-        }
+        // 4. Constrói a interface do usuário (menu de macros).
+        this.buildUI();
 
-        // --- LÓGICA DE COMUNICAÇÃO E STORAGE ---
-        async loadCredentials() {
-            this.githubToken = await this.getStorageData('github_pat');
-            if (this.githubToken) {
-                this.githubUser = await this.getGithubUser();
+        console.log('TerminalPMPlus: Inicialização completa.');
+    }
+
+    /**
+     * Aguarda o objeto 'term' ser definido na página, com um timeout.
+     * @returns {Promise<boolean>} True se o objeto foi encontrado, false caso contrário.
+     */
+    waitForTermObject() {
+        return new Promise(resolve => {
+            let attempts = 0;
+            const interval = setInterval(() => {
+                if (window.term) {
+                    clearInterval(interval);
+                    resolve(true);
+                } else if (attempts > 50) { // Timeout de ~5 segundos
+                    clearInterval(interval);
+                    resolve(false);
+                }
+                attempts++;
+            }, 100);
+        });
+    }
+
+    /**
+     * Carrega o token do storage e, em seguida, busca os dados do usuário do GitHub.
+     */
+    async loadCredentials() {
+        try {
+            console.log('TerminalPMPlus: Carregando token do GitHub...');
+            this.github_pat = await getStorageValue('github_pat');
+
+            if (!this.github_pat) {
+                console.warn('TerminalPMPlus: Token do GitHub não encontrado no storage. Funções de macro estarão desabilitadas.');
+                return;
             }
-        }
+            
+            console.log('TerminalPMPlus: Token encontrado. Autenticando com o GitHub...');
+            const response = await this.githubApiRequest('user');
 
-        getStorageData(key) {
-            return new Promise(resolve => {
-                const listener = (event) => {
-                    if (event.source === window && event.data.type === 'tpm_storage_response' && event.data.key === key) {
-                        window.removeEventListener('message', listener);
-                        resolve(event.data.value);
-                    }
-                };
-                window.addEventListener('message', listener);
-                window.postMessage({ type: 'tpm_get_storage', key: key }, '*');
-            });
+            if (response.ok) {
+                this.github_user = await response.json();
+                console.log(`TerminalPMPlus: Autenticado com sucesso como "${this.github_user.login}".`);
+            } else {
+                console.error(`TerminalPMPlus: Falha na autenticação com o GitHub. Status: ${response.status}. Verifique se o token é válido e tem as permissões corretas.`);
+                this.github_pat = null; // Invalida o token para evitar mais erros.
+            }
+        } catch (error) {
+            console.error('TerminalPMPlus: Erro crítico ao carregar credenciais.', error);
         }
+    }
 
-        setStorageData(key, value) {
-            window.postMessage({ type: 'tpm_set_storage', key: key, value: value }, '*');
-        }
+    /**
+     * Envia uma requisição para a API do GitHub através da extensão (background script).
+     * @param {string} endpoint O endpoint da API (ex: 'user', 'repos/owner/repo/contents/path').
+     * @param {string} method O método HTTP (GET, POST, PUT, DELETE).
+     * @param {object|null} body O corpo da requisição (para POST, PUT).
+     * @returns {Promise<object>} Um objeto simulando a resposta do fetch.
+     */
+    githubApiRequest(endpoint, method = 'GET', body = null) {
+        return new Promise((resolve, reject) => {
+            if (!this.github_pat) {
+                // Este erro agora é esperado se o token não for encontrado.
+                return reject(new Error("Token do GitHub não encontrado."));
+            }
 
-        // --- LÓGICA DA API DO GITHUB ---
-        async githubApiRequest(endpoint, method = 'GET', body = null) {
             const url = `https://api.github.com/${endpoint}`;
-            const token = this.github_pat; // Supondo que você já tenha o token carregado
-        
-            if (!token ) {
-                throw new Error("Token do GitHub não encontrado.");
-            }
-        
             const options = {
                 method: method,
                 headers: {
-                    'Authorization': `token ${token}`,
+                    'Authorization': `token ${this.github_pat}`,
                     'Accept': 'application/vnd.github.v3+json'
                 }
             };
-        
-            if (body) {
+            if (body ) {
                 options.body = JSON.stringify(body);
             }
-        
-            // A MÁGICA ACONTECE AQUI!
-            // Em vez de 'fetch(url, options)', enviamos uma mensagem para a extensão.
-            return new Promise((resolve, reject) => {
-                // Listener para a resposta que virá do background
-                const responseListener = (event) => {
-                    if (event.source === window && event.data.type === 'tpm_api_response') {
-                        window.removeEventListener('message', responseListener); // Limpa o listener
-                        if (event.data.success) {
-                            // Simula um objeto de resposta do fetch para manter a compatibilidade
-                            const simulatedResponse = {
-                                ok: event.data.response.ok,
-                                status: event.data.response.status,
-                                statusText: event.data.response.statusText,
-                                json: () => Promise.resolve(event.data.response.data)
-                            };
-                            resolve(simulatedResponse);
-                        } else {
-                            reject(new Error(event.data.error));
-                        }
+
+            const timeout = setTimeout(() => {
+                window.removeEventListener('message', listener);
+                reject(new Error('Timeout na requisição para a extensão.'));
+            }, 15000);
+
+            const listener = (event) => {
+                if (event.source === window && event.data.type === 'tpm_api_response') {
+                    clearTimeout(timeout);
+                    window.removeEventListener('message', listener);
+                    if (event.data.success) {
+                        resolve({
+                            ok: event.data.response.ok,
+                            status: event.data.response.status,
+                            statusText: event.data.response.statusText,
+                            json: () => Promise.resolve(event.data.response.data),
+                            text: () => Promise.resolve(JSON.stringify(event.data.response.data))
+                        });
+                    } else {
+                        reject(new Error(`Erro na API via extensão: ${event.data.error}`));
                     }
-                };
-                window.addEventListener('message', responseListener);
-        
-                // Envia a requisição para o content-script, que a repassará para o background
-                window.postMessage({
-                    type: 'tpm_api_request',
-                    payload: { url, options }
-                }, '*');
-            });
-        }
-
-        async getGithubUser() {
-            const user = await this.githubApiRequest('../../user'); // Endpoint para pegar o usuário autenticado
-            if (user) {
-                console.log(`Usuário GitHub autenticado: ${user.login}`);
-                return user;
-            }
-            return null;
-        }
-
-        async fetchMacrosFromGithub(path = GITHUB_MACROS_PATH) {
-            const contents = await this.githubApiRequest(`contents/${path}`);
-            if (!contents || !Array.isArray(contents)) return {};
-
-            const structure = {};
-            for (const item of contents) {
-                if (item.type === 'dir') {
-                    structure[item.name] = await this.fetchMacrosFromGithub(item.path);
-                } else if (item.name.endsWith('.txt')) {
-                    structure[item.name] = { type: 'file', path: item.path, sha: item.sha, download_url: item.download_url };
                 }
-            }
-            return structure;
-        }
-
-        async saveMacroToGithub(filePath, content) {
-            const fullPath = `${GITHUB_MACROS_PATH}/${filePath}`;
-            const existingFile = await this.githubApiRequest(`contents/${fullPath}`);
-
-            const data = {
-                message: `Salva macro: ${filePath}`,
-                content: btoa(unescape(encodeURIComponent(content))) // Base64 encoding
             };
-            if (existingFile && existingFile.sha) {
-                data.sha = existingFile.sha; // For updates, provide the blob SHA
-            }
 
-            const result = await this.githubApiRequest(`contents/${fullPath}`, 'PUT', data);
-            if (result && result.success) {
-                this.showNotification(`Macro "${filePath}" salva com sucesso!`, true);
-                await this.refreshMacros();
-            }
-        }
-
-        async deleteMacroFromGithub(filePath, sha) {
-            // Permissão de exclusão
-            if (!this.githubUser || this.githubUser.login !== ADMIN_USER) {
-                this.showNotification(`Você não tem permissão para excluir macros. Apenas '${ADMIN_USER}'.`, false);
-                return;
-            }
-
-            const fullPath = `${GITHUB_MACROS_PATH}/${filePath}`;
-            const result = await this.githubApiRequest(`contents/${fullPath}`, 'DELETE', {
-                message: `Exclui macro: ${filePath}`,
-                sha: sha
-            });
-
-            if (result && result.success) {
-                this.showNotification(`Macro "${filePath}" excluída com sucesso!`, true);
-                await this.refreshMacros();
-            }
-        }
-
-        async refreshMacros() {
-            this.macros = await this.fetchMacrosFromGithub();
-            this.populateMacroMenu(this.macros, document.getElementById('tpm-macros-list'));
-        }
-
-        // --- LÓGICA DA INTERFACE (UI) ---
-        createMainMenu() {
-            if (document.getElementById('tpm-menu-container')) return;
-            const container = document.createElement('div');
-            container.id = 'tpm-menu-container';
-            container.innerHTML = `
-                <button id="tpm-menu-toggle">☰ TerminalPMPlus</button>
-                <div class="tpm-menu-dropdown" id="tpm-main-menu">
-                    <div class="tpm-menu-section">Macros</div>
-                    <div id="tpm-macros-list">Carregando...</div>
-                    <div class="tpm-menu-section">Ações</div>
-                    <div class="tpm-menu-item" id="tpm-record-macro">⏺️ Gravar Nova Macro</div>
-                    <div class="tpm-menu-item" id="tpm-stop-recording" style="display:none; background-color: #ffebee;">⏹️ Parar Gravação</div>
-                    <div class="tpm-menu-section">Configuração</div>
-                    <div class="tpm-menu-item" id="tpm-set-user">👤 Definir Usuário</div>
-                    <div class="tpm-menu-item" id="tpm-set-pass">🔑 Definir Senha</div>
-                    <div class="tpm-menu-item-static" id="tpm-auth-user"></div>
-                </div>
-            `;
-            document.body.appendChild(container);
-
-            document.getElementById('tpm-menu-toggle').addEventListener('click', () => {
-                const menu = document.getElementById('tpm-main-menu');
-                menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
-            });
-            
-            document.getElementById('tpm-set-user').addEventListener('click', () => this.setCredential('terminal_user', 'Digite seu usuário do terminal:'));
-            document.getElementById('tpm-set-pass').addEventListener('click', () => this.setCredential('terminal_pass', 'Digite sua senha do terminal (será salva localmente):'));
-            document.getElementById('tpm-record-macro').addEventListener('click', () => this.startRecording());
-            document.getElementById('tpm-stop-recording').addEventListener('click', () => this.stopRecording());
-
-            const userDisplay = document.getElementById('tpm-auth-user');
-            if(this.githubUser) {
-                userDisplay.textContent = `GH: ${this.githubUser.login}`;
-                userDisplay.style.color = 'green';
-            } else {
-                userDisplay.textContent = 'GH: Não autenticado';
-                userDisplay.style.color = 'red';
-            }
-        }
-
-        populateMacroMenu(structure, parentElement) {
-            parentElement.innerHTML = !Object.keys(structure).length ? 'Nenhuma macro encontrada.' : '';
-            const isAdmin = this.githubUser && this.githubUser.login === ADMIN_USER;
-
-            Object.keys(structure).sort().forEach(key => {
-                const item = structure[key];
-                if (item.type === 'file') {
-                    const macroName = key.replace('.txt', '');
-                    const itemDiv = document.createElement('div');
-                    itemDiv.className = 'tpm-menu-item-container';
-                    
-                    const btn = document.createElement('button');
-                    btn.className = 'tpm-menu-item';
-                    btn.textContent = `▶️ ${macroName}`;
-                    btn.onclick = async () => {
-                        const response = await fetch(item.download_url, {cache: 'no-store'});
-                        const content = await response.text();
-                        this.executeMacro(content, macroName);
-                    };
-                    
-                    const delBtn = document.createElement('button');
-                    delBtn.className = 'tpm-delete-btn';
-                    delBtn.textContent = '🗑️';
-                    delBtn.title = 'Excluir macro';
-                    delBtn.style.display = isAdmin ? 'inline-block' : 'none';
-                    delBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        if (confirm(`Tem certeza que deseja excluir a macro "${macroName}"?`)) {
-                            this.deleteMacroFromGithub(key, item.sha);
-                        }
-                    };
-
-                    itemDiv.appendChild(btn);
-                    itemDiv.appendChild(delBtn);
-                    parentElement.appendChild(itemDiv);
-
-                } else {
-                    // Lógica para subpastas (se necessário no futuro)
-                }
-            });
-        }
-        
-        showNotification(message, isSuccess = true) {
-            const notification = document.createElement('div');
-            notification.className = 'tpm-notification';
-            notification.textContent = message;
-            notification.style.backgroundColor = isSuccess ? '#4CAF50' : '#F44336';
-            document.body.appendChild(notification);
-            setTimeout(() => notification.remove(), 3000);
-        }
-
-        // --- LÓGICA DE CREDENCIAIS E LOGIN ---
-        async setCredential(key, promptText) {
-            const value = prompt(promptText);
-            if (value) { // Salva mesmo que seja string vazia para limpar
-                this.setStorageData(key, value);
-                this.showNotification(`${key.includes('user') ? 'Usuário' : 'Senha'} salvo(a) com sucesso!`, true);
-            } else if (value === null) {
-                this.showNotification('Operação cancelada.', false);
-            }
-        }
-
-        async tryAutoLogin() {
-            const user = await this.getStorageData('terminal_user');
-            const pass = await this.getStorageData('terminal_pass');
-            if (!user || !pass) return;
-
-            // Busca por uma macro específica de login
-            const loginMacroKey = Object.keys(this.macros).find(k => k.toLowerCase() === '_login.txt');
-            if (loginMacroKey) {
-                const item = this.macros[loginMacroKey];
-                const response = await fetch(item.download_url, {cache: 'no-store'});
-                let content = await response.text();
-                content = content.replace(/%%USER%%/g, user).replace(/%%PASS%%/g, pass);
-                this.executeMacro(content, '_Login');
-            }
-        }
-
-        // --- LÓGICA DE GRAVAÇÃO DE MACRO ---
-        startRecording() {
-            if (this.isRecording) return;
-            this.isRecording = true;
-            this.recordedMacro = [];
-            document.getElementById('tpm-record-macro').style.display = 'none';
-            document.getElementById('tpm-stop-recording').style.display = 'block';
-            this.showNotification('⏺️ Gravação iniciada...', true);
-
-            // Adiciona listener para capturar o que é enviado ao terminal
-            this.term.onData(data => {
-                if (this.isRecording) {
-                    this.recordedMacro.push(data);
-                }
-            });
-        }
-
-        async stopRecording() {
-            if (!this.isRecording) return;
-            this.isRecording = false;
-            document.getElementById('tpm-record-macro').style.display = 'block';
-            document.getElementById('tpm-stop-recording').style.display = 'none';
-            this.showNotification('⏹️ Gravação finalizada.', true);
-
-            if (this.recordedMacro.length > 0) {
-                const macroName = prompt("Digite o nome do arquivo para a nova macro (ex: minha_macro.txt):");
-                if (macroName) {
-                    const macroContent = this.recordedMacro.join('');
-                    await this.saveMacroToGithub(macroName, macroContent);
-                }
-            }
-        }
-
-        // --- LÓGICA DE EXECUÇÃO ---
-        async executeMacro(macroContent, macroName = 'Macro') {
-            this.showNotification(`▶️ Executando "${macroName}"...`);
-            this.term.focus();
-            const lines = macroContent.split('\n');
-            for (const line of lines) {
-                const trimmedLine = line.trim();
-                const upperLine = trimmedLine.toUpperCase();
-                if (this.keyMap[upperLine]) {
-                    this.term.write(this.keyMap[upperLine]);
-                } else if (trimmedLine) {
-                    this.term.write(trimmedLine);
-                }
-                // Pequeno delay para o terminal processar
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            if (macroName !== '_Login') {
-                this.showNotification(`✔️ "${macroName}" executada.`);
-            }
-        }
+            window.addEventListener('message', listener);
+            window.postMessage({ type: 'tpm_api_request', payload: { url, options } }, '*');
+        });
     }
 
-    // --- PONTO DE ENTRADA ---
-    const checkTerminalInterval = setInterval(() => {
-        if (typeof term !== 'undefined' && typeof term.write === 'function') {
-            clearInterval(checkTerminalInterval);
-            console.log('TerminalPMPlus: Objeto "term" encontrado. Iniciando o sistema.');
-            const terminalApp = new TerminalPMPlus(term);
-            terminalApp.init();
-        }
-    }, 250);
+    /**
+     * Carrega a lista de macros do repositório do GitHub.
+     */
+    async loadMacros() {
+        console.log('TerminalPMPlus: Carregando macros...');
+        // Adicione aqui a lógica para buscar os arquivos de macro do seu repositório.
+        // Exemplo:
+        // const response = await this.githubApiRequest(`repos/${this.repoPath}/contents/macros`);
+        // if (response.ok) {
+        //     this.macros = await response.json();
+        //     console.log(`TerminalPMPlus: ${this.macros.length} macros carregadas.`);
+        // }
+    }
 
-})();
+    /**
+     * Constrói e injeta a interface do usuário (o menu de macros) na página.
+     */
+    buildUI() {
+        console.log('TerminalPMPlus: Construindo interface do usuário...');
+        // Adicione aqui o código que cria o botão e o menu dropdown.
+        // O código do seu styles.css será aplicado automaticamente.
+    }
+
+    /**
+     * Executa uma macro.
+     * @param {string} macroContent O conteúdo da macro a ser executado.
+     */
+    executeMacro(macroContent) {
+        if (window.term) {
+            // Exemplo: envia o conteúdo da macro para o terminal.
+            window.term.io.sendString(macroContent);
+        }
+    }
+}
+
+
+// --- Ponto de Entrada da Aplicação ---
+// Garante que o script só rode uma vez.
+if (!window.TerminalPMPlusInstance) {
+    const tpmInstance = new TerminalPMPlus();
+    window.TerminalPMPlusInstance = tpmInstance;
+    
+    // Inicia a aplicação.
+    tpmInstance.init();
+}
+
