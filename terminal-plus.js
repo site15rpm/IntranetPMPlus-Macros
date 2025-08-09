@@ -190,14 +190,35 @@ class TerminalPMPlus {
      * Carrega a lista de macros do repositório do GitHub.
      */
     async loadMacros() {
-        console.log('TerminalPMPlus: Carregando macros...');
-        // Adicione aqui a lógica para buscar os arquivos de macro do seu repositório.
-        // Exemplo:
-        // const response = await this.githubApiRequest(`repos/${this.repoPath}/contents/macros`);
-        // if (response.ok) {
-        //     this.macros = await response.json();
-        //     console.log(`TerminalPMPlus: ${this.macros.length} macros carregadas.`);
-        // }
+        if (!this.github_user) return; // Não faz nada se não estiver autenticado
+
+        console.log('TerminalPMPlus: Carregando macros do repositório...');
+        try {
+            // Busca o conteúdo do diretório 'macros' no seu repositório.
+            // CRIE UMA PASTA CHAMADA 'macros' NA RAIZ DO SEU REPOSITÓRIO se ainda não existir.
+            const response = await this.githubApiRequest(`repos/${this.repoPath}/contents/macros`);
+
+            if (response.ok) {
+                const files = await response.json();
+                // Filtra para pegar apenas arquivos (e não pastas) e armazena os dados.
+                this.macros = files.filter(file => file.type === 'file').map(file => ({
+                    name: file.name.replace(/\.[^/.]+$/, ""), // Remove a extensão do arquivo para o nome
+                    path: file.path,
+                    sha: file.sha
+                }));
+                console.log(`TerminalPMPlus: ${this.macros.length} macros encontradas.`);
+            } else {
+                // Trata o caso de o diretório 'macros' não existir.
+                if (response.status === 404) {
+                    console.warn('TerminalPMPlus: O diretório "macros" não foi encontrado no repositório. Nenhuma macro será carregada.');
+                    this.macros = [];
+                } else {
+                    console.error(`TerminalPMPlus: Falha ao carregar macros. Status: ${response.status}`);
+                }
+            }
+        } catch (error) {
+            console.error('TerminalPMPlus: Erro crítico ao carregar macros.', error);
+        }
     }
 
     /**
@@ -205,22 +226,99 @@ class TerminalPMPlus {
      */
     buildUI() {
         console.log('TerminalPMPlus: Construindo interface do usuário...');
-        // Adicione aqui o código que cria o botão e o menu dropdown.
-        // O código do seu styles.css será aplicado automaticamente.
+
+        // Remove qualquer menu antigo para evitar duplicatas ao recarregar.
+        const oldContainer = document.getElementById('tpm-menu-container');
+        if (oldContainer) oldContainer.remove();
+
+        // Cria o container principal.
+        const container = document.createElement('div');
+        container.id = 'tpm-menu-container';
+
+        // Cria o botão que abre o menu.
+        const toggleButton = document.createElement('button');
+        toggleButton.id = 'tpm-menu-toggle';
+        toggleButton.textContent = '☰ TerminalPMPlus';
+
+        // Cria o painel do menu dropdown.
+        const dropdown = document.createElement('div');
+        dropdown.className = 'tpm-menu-dropdown';
+
+        // Adiciona o nome do usuário autenticado (se houver).
+        if (this.github_user) {
+            const userDiv = document.createElement('div');
+            userDiv.id = 'tpm-auth-user';
+            userDiv.textContent = `Logado como: ${this.github_user.login}`;
+            dropdown.appendChild(userDiv);
+        }
+
+        // Adiciona a seção de macros.
+        const macrosSection = document.createElement('div');
+        macrosSection.className = 'tpm-menu-section';
+        macrosSection.textContent = 'Macros Salvas';
+        dropdown.appendChild(macrosSection);
+
+        // Adiciona cada macro como um item no menu.
+        if (this.macros.length > 0) {
+            this.macros.forEach(macro => {
+                const menuItem = document.createElement('button');
+                menuItem.className = 'tpm-menu-item';
+                menuItem.textContent = macro.name;
+                menuItem.addEventListener('click', () => {
+                    this.executeMacro(macro.path); // Passa o caminho para a função de execução
+                    dropdown.style.display = 'none'; // Fecha o menu após clicar
+                });
+                dropdown.appendChild(menuItem);
+            });
+        } else {
+            const noMacrosItem = document.createElement('div');
+            noMacrosItem.className = 'tpm-menu-item-static';
+            noMacrosItem.textContent = 'Nenhuma macro encontrada.';
+            dropdown.appendChild(noMacrosItem);
+        }
+
+        // Monta a estrutura.
+        container.appendChild(toggleButton);
+        container.appendChild(dropdown);
+        document.body.appendChild(container);
+
+        // Adiciona a lógica para abrir/fechar o menu.
+        toggleButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            dropdown.style.display = dropdown.style.display === 'block' ? 'none' : 'block';
+        });
+
+        // Fecha o menu se clicar fora dele.
+        document.addEventListener('click', () => {
+            dropdown.style.display = 'none';
+        });
     }
 
     /**
-     * Executa uma macro.
-     * @param {string} macroContent O conteúdo da macro a ser executado.
+     * Busca o conteúdo de uma macro do GitHub e a executa no terminal.
+     * @param {string} macroPath O caminho do arquivo da macro no repositório.
      */
-    executeMacro(macroContent) {
-        if (window.term) {
-            // Exemplo: envia o conteúdo da macro para o terminal.
-            window.term.io.sendString(macroContent);
+    async executeMacro(macroPath) {
+        console.log(`TerminalPMPlus: Executando macro de: ${macroPath}`);
+        try {
+            const response = await this.githubApiRequest(`repos/${this.repoPath}/contents/${macroPath}`);
+            if (response.ok) {
+                const fileContent = await response.json();
+                // O conteúdo de arquivos no GitHub é codificado em base64.
+                const decodedContent = atob(fileContent.content);
+                
+                if (window.term) {
+                    window.term.io.sendString(decodedContent);
+                    console.log('TerminalPMPlus: Macro executada com sucesso.');
+                }
+            } else {
+                console.error(`TerminalPMPlus: Falha ao buscar conteúdo da macro. Status: ${response.status}`);
+            }
+        } catch (error) {
+            console.error('TerminalPMPlus: Erro ao executar macro.', error);
         }
     }
 }
-
 
 // --- Ponto de Entrada da Aplicação ---
 // Garante que o script só rode uma vez.
