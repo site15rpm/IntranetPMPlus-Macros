@@ -308,7 +308,7 @@ class TerminalPMPlus {
                 const decodedContent = atob(fileContent.content);
                 
                 if (window.term) {
-                    window.term.io.sendString(decodedContent);
+                    window.term.write(decodedContent);
                     console.log('TerminalPMPlus: Macro executada com sucesso.');
                 }
             } else {
