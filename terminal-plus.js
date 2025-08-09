@@ -70,33 +70,54 @@
 
         // --- LÓGICA DA API DO GITHUB ---
         async githubApiRequest(endpoint, method = 'GET', body = null) {
-            if (!this.githubToken) {
-                this.showNotification('Token do GitHub não configurado.', false);
-                return null;
+            const url = `https://api.github.com/${endpoint}`;
+            const token = this.github_pat; // Supondo que você já tenha o token carregado
+        
+            if (!token ) {
+                throw new Error("Token do GitHub não encontrado.");
             }
-            const url = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/${endpoint}`;
-            const headers = {
-                'Accept': 'application/vnd.github.v3+json',
-                'Authorization': `token ${this.githubToken}`,
-                'X-GitHub-Api-Version': '2022-11-28'
-            };
-
-            const options = { method, headers, cache: 'no-store' };
-            if (body) options.body = JSON.stringify(body);
-
-            try {
-                const response = await fetch(url, options);
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(`[${response.status}] ${errorData.message}`);
+        
+            const options = {
+                method: method,
+                headers: {
+                    'Authorization': `token ${token}`,
+                    'Accept': 'application/vnd.github.v3+json'
                 }
-                if (response.status === 204 || response.status === 201) return { success: true };
-                return await response.json();
-            } catch (error) {
-                console.error('GitHub API Request Failed:', error);
-                this.showNotification(`Erro na API GitHub: ${error.message}`, false);
-                return null;
+            };
+        
+            if (body) {
+                options.body = JSON.stringify(body);
             }
+        
+            // A MÁGICA ACONTECE AQUI!
+            // Em vez de 'fetch(url, options)', enviamos uma mensagem para a extensão.
+            return new Promise((resolve, reject) => {
+                // Listener para a resposta que virá do background
+                const responseListener = (event) => {
+                    if (event.source === window && event.data.type === 'tpm_api_response') {
+                        window.removeEventListener('message', responseListener); // Limpa o listener
+                        if (event.data.success) {
+                            // Simula um objeto de resposta do fetch para manter a compatibilidade
+                            const simulatedResponse = {
+                                ok: event.data.response.ok,
+                                status: event.data.response.status,
+                                statusText: event.data.response.statusText,
+                                json: () => Promise.resolve(event.data.response.data)
+                            };
+                            resolve(simulatedResponse);
+                        } else {
+                            reject(new Error(event.data.error));
+                        }
+                    }
+                };
+                window.addEventListener('message', responseListener);
+        
+                // Envia a requisição para o content-script, que a repassará para o background
+                window.postMessage({
+                    type: 'tpm_api_request',
+                    payload: { url, options }
+                }, '*');
+            });
         }
 
         async getGithubUser() {
