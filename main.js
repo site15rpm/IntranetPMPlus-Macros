@@ -1,14 +1,14 @@
 /**
  * =============================================================================
- * TerminalPlus - Lógica Principal (Hospedado no GitHub)
+ * TerminalPlus - Lógica Principal v4.0 (Hospedado no GitHub)
  * 
- * Este script contém toda a lógica de UI, gravação, edição, execução de macros,
- * gatilhos automáticos e configuração de login. Ele se comunica com a extensão
- * local (via content-script) para acessar o chrome.storage e o backend.
+ * Gerencia macros armazenadas em um repositório do GitHub.
+ * Requer configuração de usuário, repositório e um Token de Acesso Pessoal (PAT)
+ * para salvar e excluir macros.
  * =============================================================================
  */
 
-// Garante que o script só seja inicializado uma vez.
+// Garante que o script só seja inicializado uma vez, mesmo que seja injetado múltiplas vezes.
 if (window.TerminalPlus) {
     console.log("TerminalPlus: Tentativa de reinicialização bloqueada. O sistema já está em execução.");
 } else {
@@ -16,7 +16,7 @@ if (window.TerminalPlus) {
     class TerminalPlus {
         constructor(term) {
             this.term = term;
-            this.macros = {};
+            this.macros = {}; // Cache para o conteúdo das macros já carregadas
             this.triggers = {};
             this.isRecording = false;
             this.recordedSteps = [];
@@ -33,12 +33,11 @@ if (window.TerminalPlus) {
         }
 
         async init() {
-            console.log("TerminalPlus: Inicializando sistema a partir do GitHub...");
+            console.log("TerminalPlus: Inicializando sistema v4.0 (GitHub)...");
             this.createMenu();
             this.setupListeners();
             await this.loadTriggers();
-            await this.fetchMacros();
-            this.startScreenObserver();
+            await this.fetchMacroList(); // Carrega a lista inicial de macros
         }
 
         // --- LÓGICA DE COMUNICAÇÃO (Ponte com a Extensão Local) ---
@@ -54,12 +53,14 @@ if (window.TerminalPlus) {
         }
 
         setupListeners() {
+            // Listener para capturar teclas durante a gravação
             this.term.onKey(e => {
                 if (this.isRecording) {
                     const specialKey = Object.keys(this.keyMap).find(key => this.keyMap[key] === e.key);
                     if (specialKey) {
                         this.recordedSteps.push(`<${specialKey}>`);
                     } else {
+                        // Agrupa digitação normal para manter o texto coeso
                         if (this.recordedSteps.length > 0 && !this.recordedSteps[this.recordedSteps.length - 1].startsWith('<')) {
                             this.recordedSteps[this.recordedSteps.length - 1] += e.key;
                         } else {
@@ -79,11 +80,12 @@ if (window.TerminalPlus) {
                 <div id="macro-menu-dropdown" style="display: none;">
                     <div class="macro-menu-section">Macros</div>
                     <button class="macro-menu-item" id="record-macro-btn">⏺️ Gravar Nova Macro</button>
-                    <div id="macro-list-container"><div class="macro-menu-item-static">Carregando...</div></div>
+                    <div id="macro-list-container"><div class="macro-menu-item-static">Configure o GitHub...</div></div>
                     
                     <div class="macro-menu-section">Configuração</div>
-                    <button class="macro-menu-item" id="set-user-btn">👤 Definir Usuário</button>
-                    <button class="macro-menu-item" id="set-pass-btn">🔑 Definir Senha</button>
+                    <button class="macro-menu-item" id="set-github-btn">⚙️ Configurar GitHub</button>
+                    <button class="macro-menu-item" id="set-user-btn">👤 Definir Usuário Terminal</button>
+                    <button class="macro-menu-item" id="set-pass-btn">🔑 Definir Senha Terminal</button>
                     <button class="macro-menu-item" id="manage-triggers-btn">⚡ Gerenciar Gatilhos</button>
                 </div>`;
             const menuContainer = document.createElement('div');
@@ -97,8 +99,8 @@ if (window.TerminalPlus) {
                 dropdown.style.display = dropdown.style.display === 'block' ? 'none' : 'block';
             });
             
-            // Adiciona listeners para os botões
             document.getElementById('record-macro-btn').addEventListener('click', () => this.toggleRecording());
+            document.getElementById('set-github-btn').addEventListener('click', () => this.openGitHubConfig());
             document.getElementById('set-user-btn').addEventListener('click', () => this.setLoginCredential('user'));
             document.getElementById('set-pass-btn').addEventListener('click', () => this.setLoginCredential('pass'));
             document.getElementById('manage-triggers-btn').addEventListener('click', () => this.openTriggerManager());
@@ -107,16 +109,16 @@ if (window.TerminalPlus) {
             document.getElementById('macro-menu-dropdown').addEventListener('click', e => e.stopPropagation());
         }
 
-        populateMacroList() {
+        populateMacroList(names = []) {
             const container = document.getElementById('macro-list-container');
             container.innerHTML = '';
-            const names = Object.keys(this.macros).filter(name => name !== '_Login').sort();
+            const sortedNames = names.filter(name => name !== '_Login').sort();
 
-            if (names.length === 0) {
+            if (sortedNames.length === 0) {
                 container.innerHTML = `<div class="macro-menu-item-static">Nenhuma macro encontrada.</div>`;
                 return;
             }
-            names.forEach(name => {
+            sortedNames.forEach(name => {
                 const itemContainer = document.createElement('div');
                 itemContainer.className = 'macro-menu-item-container';
                 itemContainer.innerHTML = `
@@ -141,7 +143,34 @@ if (window.TerminalPlus) {
             setTimeout(() => notificationDiv.remove(), duration);
         }
 
-        // --- LÓGICA DE CONFIGURAÇÃO (antigo popup.js) ---
+        // --- LÓGICA DE CONFIGURAÇÃO ---
+        async openGitHubConfig() {
+            const user = await this.getStorage('github_user') || '';
+            const repo = await this.getStorage('github_repo') || '';
+            const token = await this.getStorage('github_token') || '';
+
+            const contentHTML = `
+                <p style="font-size: 14px; color: #333; margin-bottom: 15px;">Forneça os detalhes do seu repositório e um Token de Acesso Pessoal (PAT) para salvar e excluir macros.</p>
+                <div class="config-row"><label>Usuário GitHub:</label><input id="cfg-gh-user" type="text" value="${user}" placeholder="ex: seu-usuario"></div>
+                <div class="config-row"><label>Repositório:</label><input id="cfg-gh-repo" type="text" value="${repo}" placeholder="ex: meu-repo-de-macros"></div>
+                <div class="config-row"><label>Token (PAT):</label><input id="cfg-gh-token" type="password" value="${token}" placeholder="Cole seu token aqui"></div>
+                <p style="font-size: 12px; color: #666; margin-top: 10px;">O token é salvo apenas no seu computador e é necessário para permitir que a extensão escreva arquivos no seu repositório.</p>
+            `;
+            this.createModal('Configuração do GitHub', contentHTML, async (modal) => {
+                const newUser = modal.querySelector('#cfg-gh-user').value.trim();
+                const newRepo = modal.querySelector('#cfg-gh-repo').value.trim();
+                const newToken = modal.querySelector('#cfg-gh-token').value.trim();
+
+                await this.setStorage('github_user', newUser);
+                await this.setStorage('github_repo', newRepo);
+                await this.setStorage('github_token', newToken);
+
+                this.showNotification('Configurações do GitHub salvas!');
+                modal.remove();
+                this.fetchMacroList(); // Recarrega a lista com as novas configurações
+            });
+        }
+
         async setLoginCredential(type) {
             const key = `terminal_${type}`;
             const promptMessage = type === 'user' 
@@ -151,44 +180,59 @@ if (window.TerminalPlus) {
             const currentValue = await this.getStorage(key) || '';
             const value = prompt(promptMessage, currentValue);
 
-            if (value !== null) { // Permite salvar um valor em branco para limpar
+            if (value !== null) {
                 this.setStorage(key, value);
                 this.showNotification(`${type === 'user' ? 'Usuário' : 'Senha'} salvo(a) com sucesso!`);
             }
         }
 
         // --- LÓGICA DE MACROS ---
-        async fetchMacros() {
+        async fetchMacroList() {
             this.sendMessageToExtension({ action: 'fetchMacros' }, (response) => {
                 if (response && response.success) {
-                    this.macros = response.data;
-                    this.populateMacroList();
-                    if (this.macros['_Login']) {
+                    this.populateMacroList(response.data);
+                    if (response.data.includes('_Login')) {
                         this.executeMacro('_Login');
                     }
                 } else {
-                    this.showNotification('Erro ao carregar macros do backend.', false);
+                    this.showNotification(response.error || 'Erro ao carregar lista de macros.', false);
+                    this.populateMacroList([]);
                 }
             });
         }
 
-        async executeMacro(name) {
-            let macroText = this.macros[name];
-            if (typeof macroText === 'undefined') {
-                this.showNotification(`Macro "${name}" não encontrada.`, false);
-                return;
+        async getMacroContent(name) {
+            if (this.macros[name]) {
+                return this.macros[name];
             }
+            return new Promise(resolve => {
+                this.sendMessageToExtension({ action: 'fetchMacroContent', name }, (response) => {
+                    if (response && response.success) {
+                        this.macros[name] = response.data;
+                        resolve(response.data);
+                    } else {
+                        this.showNotification(`Erro ao carregar conteúdo da macro "${name}".`, false);
+                        resolve(null);
+                    }
+                });
+            });
+        }
+
+        async executeMacro(name) {
+            const macroText = await this.getMacroContent(name);
+            if (macroText === null) return;
 
             this.showNotification(`▶️ Executando macro "${name}"...`);
             this.term.focus();
 
+            let processedText = macroText;
             if (name === '_Login') {
                 const user = await this.getStorage('terminal_user') || '';
                 const pass = await this.getStorage('terminal_pass') || '';
-                macroText = macroText.replace(/{USER}/g, user).replace(/{PASS}/g, pass);
+                processedText = processedText.replace(/{USER}/g, user).replace(/{PASS}/g, pass);
             }
 
-            const lines = macroText.split('\n');
+            const lines = processedText.split('\n');
             for (const line of lines) {
                 const upperLine = line.trim().toUpperCase();
                 const specialKey = Object.keys(this.keyMap).find(k => `<${k}>` === upperLine);
@@ -202,14 +246,27 @@ if (window.TerminalPlus) {
             if (name !== '_Login') this.showNotification(`✔️ Macro "${name}" executada.`);
         }
 
+        saveMacro(name, content) {
+             this.sendMessageToExtension({ action: 'saveMacro', name, content }, (response) => {
+                if (response && response.success) {
+                    this.showNotification(`Macro "${name}" salva com sucesso!`);
+                    this.macros[name] = content;
+                    this.fetchMacroList();
+                } else {
+                    this.showNotification(response.error || 'Erro ao salvar a macro.', false);
+                }
+            });
+        }
+
         deleteMacro(name) {
-            if (!confirm(`Tem certeza que deseja excluir a macro "${name}"?`)) return;
+            if (!confirm(`Tem certeza que deseja excluir a macro "${name}" do GitHub? Esta ação não pode ser desfeita.`)) return;
             this.sendMessageToExtension({ action: 'deleteMacro', name }, (response) => {
                 if (response && response.success) {
                     this.showNotification(`Macro "${name}" excluída com sucesso.`);
-                    this.fetchMacros();
+                    delete this.macros[name];
+                    this.fetchMacroList();
                 } else {
-                    this.showNotification(`Erro ao excluir a macro.`, false);
+                    this.showNotification(response.error || 'Erro ao excluir a macro.', false);
                 }
             });
         }
@@ -245,32 +302,19 @@ if (window.TerminalPlus) {
 
         saveRecordedMacro() {
             if (this.recordedSteps.length === 0) return;
-            const name = prompt("Digite um nome para a nova macro:");
+            const name = prompt("Digite um nome para a nova macro (sem espaços ou caracteres especiais):");
             if (!name || name.trim() === '') return;
+            const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '');
             const content = this.recordedSteps.join('\n');
-            this.sendMessageToExtension({ action: 'saveMacro', name, content }, (response) => {
-                if (response && response.success) {
-                    this.showNotification(`Macro "${name}" salva com sucesso!`);
-                    this.fetchMacros();
-                } else {
-                    this.showNotification('Erro ao salvar a macro.', false);
-                }
-            });
+            this.saveMacro(sanitizedName, content);
         }
 
-        openEditor(name) {
-            const content = this.macros[name] || '';
+        async openEditor(name) {
+            const content = await this.getMacroContent(name) || '';
             this.createModal('Editando Macro: ' + name, `<textarea id="modal-textarea">${content}</textarea>`, (modal) => {
                 const newContent = modal.querySelector('#modal-textarea').value;
-                this.sendMessageToExtension({ action: 'saveMacro', name, content: newContent }, (response) => {
-                    if (response && response.success) {
-                        this.showNotification('Macro atualizada!');
-                        this.fetchMacros();
-                    } else {
-                        this.showNotification('Erro ao salvar.', false);
-                    }
-                    modal.remove();
-                });
+                this.saveMacro(name, newContent);
+                modal.remove();
             });
         }
 
@@ -338,7 +382,9 @@ if (window.TerminalPlus) {
         }
 
         setStorage(key, value) {
-            this.sendMessageToExtension({ action: 'setStorage', key, value });
+            return new Promise(resolve => {
+                this.sendMessageToExtension({ action: 'setStorage', key, value }, resolve);
+            });
         }
 
         createModal(title, contentHTML, onSave) {
