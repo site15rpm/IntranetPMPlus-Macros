@@ -34,19 +34,37 @@ if (window.TerminalPlus) {
 
         async init() {
             console.log("TerminalPlus: Inicializando sistema a partir do GitHub...");
+            
+            // ETAPA 1: Construir a UI imediatamente.
             this.createMenu();
             this.setupListeners();
-            await this.loadTriggers();
-            await this.fetchMacros(); // Carrega macros do backend (Google Apps Script)
+            
+            // ETAPA 2: Carregar dados de forma assíncrona em segundo plano.
+            // A UI já existe e mostrará "Carregando...".
+            try {
+                await this.loadTriggers();
+                await this.fetchMacros(); // Esta função irá popular o menu quando terminar.
+            } catch (error) {
+                console.error("TerminalPlus: Erro durante o carregamento de dados.", error);
+                this.showNotification("Erro ao carregar dados do backend.", false);
+            }
+            
+            // ETAPA 3: Iniciar funcionalidades que dependem da UI.
             this.startScreenObserver();
         }
 
-        // --- LÓGICA DE COMUNICAÇÃO (Ponte com a Extensão Local) ---
+        // --- LÓGICA DE COMUNICAÇÃO (Ponte com a Extensão Local)
         sendMessageToExtension(payload, callback) {
+            const action = payload.action; // Guarda a ação original
+    
             const messageListener = (event) => {
-                if (event.source === window && event.data.type === 'FROM_EXTENSION' && event.data.originalAction === payload.action) {
+                // Verifica se a resposta corresponde à ação que foi enviada.
+                // Esta é uma forma mais simples de garantir que estamos ouvindo a resposta certa.
+                if (event.source === window && event.data.type === 'FROM_EXTENSION' && event.data.originalAction === action) {
                     window.removeEventListener('message', messageListener);
-                    if (callback) callback(event.data.payload);
+                    if (callback) {
+                        callback(event.data.payload);
+                    }
                 }
             };
             window.addEventListener('message', messageListener);
