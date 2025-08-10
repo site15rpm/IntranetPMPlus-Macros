@@ -1,0 +1,6 @@
+PMMG
+<TAB>
+<USUARIO>
+<SENHA>
+<TAB>
+<ENTER>
